@@ -59,7 +59,7 @@ table{width:100%;border-collapse:collapse;}th{text-align:left;padding:.5rem .75r
   <div class="nav-logo">Hermes</div>
   <button class="ni on" onclick="go('ov')" id="n-ov"><span class="ni-ico">&#9679;</span>Overview</button>
   <button class="ni" onclick="go('chat')" id="n-chat"><span class="ni-ico">&#9993;</span>Chat</button>
-  <button class="ni" onclick="go('rag')" id="n-rag" style="display:none"><span class="ni-ico">&#9878;</span>FC-RAG</button>
+  <button class="ni" onclick="go('rag')" id="n-rag"><span class="ni-ico">&#9878;</span>FC-RAG</button>
   <button class="ni" onclick="go('mcp')" id="n-mcp"><span class="ni-ico">&#9881;</span>MCP</button>
   <button class="ni" onclick="go('cron')" id="n-cron"><span class="ni-ico">&#8986;</span>Cron</button>
   <button class="ni" onclick="go('sk')" id="n-sk"><span class="ni-ico">&#9733;</span>Skills</button>
@@ -208,8 +208,6 @@ async function mmApply(){
 // ── Overview ──
 async function loadOv(){
   const[d,au,dk]=await Promise.all([api('/overview'),api('/auth'),api('/disk')]);
-  // Feature flags: FC-RAG 탭은 서버에서 활성화된 경우만 노출
-  if(d.features&&d.features.fc_rag){const nb=$('n-rag');if(nb)nb.style.display='';}
   const g=d.gateway||{},fm=b=>b>1048576?(b/1048576).toFixed(1)+' MB':(b/1024).toFixed(0)+' KB';
   const pl=Object.entries(g.platforms||{}).map(([k,v])=>{const s=typeof v==='object'?v.state:v;return`<div style="display:flex;justify-content:space-between;padding:.35rem 0;font-size:.8rem;"><span style="color:var(--t2)">${esc(k)}</span><span class="pill ${s==='connected'?'pg':'pr'}">${esc(s)}</span></div>`;}).join('');
   const cr=(d.cron_summary||[]).map(j=>`<tr><td style="font-weight:510">${esc(j.name)}</td><td><span class="pill ${j.enabled?'pg':'pr'}">${j.enabled?'ON':'OFF'}</span></td><td><span class="pill ${j.last_status==='ok'?'pg':j.last_status?'pr':'po'}">${esc(j.last_status||'-')}</span></td><td style="color:var(--t4);font-size:.75rem">${esc(j.deliver)}</td><td style="color:var(--t4);font-size:.75rem">${j.next_run?new Date(j.next_run).toLocaleString('ko-KR'):'-'}</td></tr>`).join('');

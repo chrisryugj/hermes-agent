@@ -29,10 +29,6 @@ except ImportError:
 HERMES_HOME = Path(os.getenv("HERMES_HOME", Path.home() / ".hermes"))
 DASHBOARD_DIR = HERMES_HOME / "dashboard"
 
-# FC-RAG 대시보드 (LexDiff 법령 질의 로그 뷰어)는 사용자 맞춤 기능.
-# 기본 비활성화. 활성화하려면: HERMES_FC_RAG_ENABLED=1
-_FC_RAG_ENABLED = os.getenv("HERMES_FC_RAG_ENABLED", "").lower() in ("1", "true", "yes", "on")
-
 # 시크릿 마스킹: 이 패턴이 키 이름에 포함되면 자동 마스킹
 _SECRET_PATTERNS = re.compile(r'TOKEN|KEY|SECRET|PASSWORD|CREDENTIAL', re.IGNORECASE)
 _SAFE_NAME = re.compile(r'^[A-Za-z][A-Za-z0-9_]*$')
@@ -224,9 +220,6 @@ async def handle_overview(request: web.Request) -> web.json_response:
         "telegram": {
             "home_channel": env.get("TELEGRAM_HOME_CHANNEL", ""),
             "allowed_users": env.get("TELEGRAM_ALLOWED_USERS", ""),
-        },
-        "features": {
-            "fc_rag": _FC_RAG_ENABLED,
         },
     })
 
@@ -1091,11 +1084,9 @@ def register_dashboard_routes(app: "web.Application") -> None:
     app.router.add_post("/api/dashboard/cron/create", handle_create_cron)
     app.router.add_post("/api/dashboard/cron/{job_id}/edit", handle_edit_cron)
     app.router.add_delete("/api/dashboard/cron/{job_id}", handle_delete_cron)
-    # FC-RAG 대시보드 (LexDiff 맞춤 기능) — HERMES_FC_RAG_ENABLED=1 로만 활성화
-    if _FC_RAG_ENABLED:
-        app.router.add_get("/api/dashboard/fc-rag/queries", handle_fc_rag_queries)
-        app.router.add_get("/api/dashboard/fc-rag/stats", handle_fc_rag_stats)
-        app.router.add_get("/api/dashboard/fc-rag/trace/{trace_id}", handle_fc_rag_trace)
+    app.router.add_get("/api/dashboard/fc-rag/queries", handle_fc_rag_queries)
+    app.router.add_get("/api/dashboard/fc-rag/stats", handle_fc_rag_stats)
+    app.router.add_get("/api/dashboard/fc-rag/trace/{trace_id}", handle_fc_rag_trace)
     # Chat menu
     app.router.add_get("/api/dashboard/chat/sessions", handle_chat_sessions)
     app.router.add_get("/api/dashboard/chat/sessions/{name}", handle_chat_session_detail)
