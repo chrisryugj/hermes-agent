@@ -323,6 +323,51 @@ OPENAI_MODEL_EXECUTION_GUIDANCE = (
     "</missing_context>"
 )
 
+# Korean Law MCP guidance — injected when the `korean-law` MCP server is loaded.
+# Addresses failure modes observed in trace ld-1775959823220 (79s 헬스장 환불 케이스):
+#   1) 별표(annex) 조회 시 discover_tools → execute_tool 왕복 헛발질 (~15s 손실)
+#   2) chain_law_system에 긴 자연어 쿼리 → 엉뚱한 법령 매칭
+#   3) chain_full_research + chain_law_system 중복 호출 (동일 의도)
+#   4) 동일 도구 3회+ 실패 시에도 포기 안 하고 루프
+KOREAN_LAW_MCP_GUIDANCE = (
+    "# Korean Law MCP (법제처 법령 도구)\n"
+    "\n"
+    "**노출 도구 15개 — discover_tools 없이 직접 호출 가능**:\n"
+    "`chain_full_research`, `chain_law_system`, `chain_action_basis`, "
+    "`chain_dispute_prep`, `chain_amendment_track`, `chain_ordinance_compare`, "
+    "`chain_procedure_detail`, `chain_document_review`, `search_law`, "
+    "`get_law_text`, **`get_annexes`** (별표/서식), `search_decisions`, "
+    "`get_decision_text`, `discover_tools`, `execute_tool`\n"
+    "\n"
+    "<annex_direct_access>\n"
+    "별표(표 형태의 기준/금액/요율)는 `get_annexes`로 **직접** 호출하라. "
+    "`discover_tools`나 `execute_tool(get_annexes(...))` 경유는 금지.\n"
+    "- 예: `get_annexes({lawName: '체육시설의 설치·이용에 관한 법률 시행령 별표3'})`\n"
+    "- 예: `get_annexes({lawName: '도로교통법 시행령', bylSeq: '000200'})`\n"
+    "chain_full_research 결과에 '별표 N 확인 필요'가 나오면 즉시 get_annexes 호출.\n"
+    "</annex_direct_access>\n"
+    "\n"
+    "<chain_query_discipline>\n"
+    "`chain_law_system`의 query는 **법령명만** 넣어라. 긴 자연어 문장은 오매칭.\n"
+    "- 좋음: `chain_law_system({query: '체육시설의 설치·이용에 관한 법률 시행령', articles: ['제21조의3']})`\n"
+    "- 나쁨: `chain_law_system({query: '체육시설 시행령 별표 3의2 이용료 반환기준'})`\n"
+    "조문 번호는 `articles` 파라미터로 분리해서 전달.\n"
+    "</chain_query_discipline>\n"
+    "\n"
+    "<no_duplicate_chains>\n"
+    "동일 세션에서 **같은 chain_* 도구를 2회 이상 호출 금지**. "
+    "chain_full_research는 이미 법령+판례+해석례+별표를 종합하므로, "
+    "이어서 chain_law_system을 부르면 중복 작업. 부족하면 `get_law_text`·"
+    "`get_annexes` 같은 단일 도구로 보강하라.\n"
+    "</no_duplicate_chains>\n"
+    "\n"
+    "<fallback_after_failure>\n"
+    "동일한 의도로 도구를 **3회 시도해도 실패**하면(파라미터 에러, "
+    "Method not found, 무관 결과), 중단하고 현재까지 확보한 정보로 답변 작성. "
+    "'~ 확인 필요'라고 명시하되 끝없는 도구 루프는 금지.\n"
+    "</fallback_after_failure>"
+)
+
 # Gemini/Gemma-specific operational guidance, adapted from OpenCode's gemini.txt.
 # Injected alongside TOOL_USE_ENFORCEMENT_GUIDANCE when the model is Gemini or Gemma.
 GOOGLE_MODEL_OPERATIONAL_GUIDANCE = (
