@@ -27,7 +27,7 @@ except ImportError:
     web = None  # type: ignore
 
 HERMES_HOME = Path(os.getenv("HERMES_HOME", Path.home() / ".hermes"))
-DASHBOARD_DIR = HERMES_HOME / "dashboard"
+DASHBOARD_DIR = Path(__file__).resolve().parent
 
 # 시크릿 마스킹: 이 패턴이 키 이름에 포함되면 자동 마스킹
 _SECRET_PATTERNS = re.compile(r'TOKEN|KEY|SECRET|PASSWORD|CREDENTIAL', re.IGNORECASE)
