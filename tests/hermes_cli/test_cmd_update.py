@@ -9,22 +9,46 @@ import pytest
 from hermes_cli.main import cmd_update, PROJECT_ROOT
 
 
-def _make_run_side_effect(branch="main", verify_ok=True, commit_count="0"):
+def _make_run_side_effect(
+    current_branch="main",
+    upstream_ref="origin/main",
+    remote_urls=None,
+    verify_ok=True,
+    commit_count="0",
+):
     """Build a side_effect function for subprocess.run that simulates git commands."""
+    remote_urls = remote_urls or {
+        "origin": "https://github.com/NousResearch/hermes-agent.git"
+    }
 
     def side_effect(cmd, **kwargs):
         joined = " ".join(str(c) for c in cmd)
 
+        if "main@{upstream}" in joined:
+            if upstream_ref is None:
+                return subprocess.CompletedProcess(cmd, 128, stdout="", stderr="")
+            return subprocess.CompletedProcess(cmd, 0, stdout=f"{upstream_ref}\n", stderr="")
+
+        if joined.endswith("git remote"):
+            remotes = "\n".join(remote_urls.keys())
+            return subprocess.CompletedProcess(cmd, 0, stdout=f"{remotes}\n", stderr="")
+
+        if "remote get-url" in joined:
+            remote = str(cmd[-1])
+            url = remote_urls.get(remote)
+            rc = 0 if url else 2
+            return subprocess.CompletedProcess(cmd, rc, stdout=f"{url or ''}\n", stderr="")
+
         # git rev-parse --abbrev-ref HEAD  (get current branch)
         if "rev-parse" in joined and "--abbrev-ref" in joined:
-            return subprocess.CompletedProcess(cmd, 0, stdout=f"{branch}\n", stderr="")
+            return subprocess.CompletedProcess(cmd, 0, stdout=f"{current_branch}\n", stderr="")
 
-        # git rev-parse --verify origin/{branch}  (check remote branch exists)
+        # git rev-parse --verify refs/remotes/<remote>/<branch>
         if "rev-parse" in joined and "--verify" in joined:
             rc = 0 if verify_ok else 128
             return subprocess.CompletedProcess(cmd, rc, stdout="", stderr="")
 
-        # git rev-list HEAD..origin/{branch} --count
+        # git rev-list HEAD..<target> --count
         if "rev-list" in joined:
             return subprocess.CompletedProcess(cmd, 0, stdout=f"{commit_count}\n", stderr="")
 
@@ -40,7 +64,7 @@ def mock_args():
 
 
 class TestCmdUpdateBranchFallback:
-    """cmd_update falls back to main when current branch has no remote counterpart."""
+    """cmd_update should update against main's configured upstream target."""
 
     @patch("shutil.which", return_value=None)
     @patch("subprocess.run")
@@ -48,14 +72,14 @@ class TestCmdUpdateBranchFallback:
         self, mock_run, _mock_which, mock_args, capsys
     ):
         mock_run.side_effect = _make_run_side_effect(
-            branch="fix/stoicneko", verify_ok=False, commit_count="3"
+            current_branch="fix/stoicneko", verify_ok=False, commit_count="3"
         )
 
         cmd_update(mock_args)
 
         commands = [" ".join(str(a) for a in c.args[0]) for c in mock_run.call_args_list]
 
-        # rev-list should use origin/main, not origin/fix/stoicneko
+        # rev-list should use main's tracking branch, not the current feature branch.
         rev_list_cmds = [c for c in commands if "rev-list" in c]
         assert len(rev_list_cmds) == 1
         assert "origin/main" in rev_list_cmds[0]
@@ -72,7 +96,7 @@ class TestCmdUpdateBranchFallback:
         self, mock_run, _mock_which, mock_args, capsys
     ):
         mock_run.side_effect = _make_run_side_effect(
-            branch="main", verify_ok=True, commit_count="2"
+            current_branch="main", verify_ok=True, commit_count="2"
         )
 
         cmd_update(mock_args)
@@ -88,12 +112,37 @@ class TestCmdUpdateBranchFallback:
         assert "main" in pull_cmds[0]
 
     @patch("shutil.which", return_value=None)
+    @patch("hermes_cli.main._sync_with_upstream_if_needed")
+    @patch("subprocess.run")
+    def test_update_uses_main_tracking_remote_named_fork(
+        self, mock_run, mock_sync, _mock_which, mock_args, capsys
+    ):
+        mock_run.side_effect = _make_run_side_effect(
+            current_branch="main",
+            upstream_ref="fork/main",
+            remote_urls={
+                "fork": "git@github.com:user/hermes-agent.git",
+                "origin": "https://github.com/NousResearch/hermes-agent.git",
+            },
+            commit_count="2",
+        )
+
+        cmd_update(mock_args)
+
+        commands = [" ".join(str(a) for a in c.args[0]) for c in mock_run.call_args_list]
+        assert any("fetch fork" in cmd for cmd in commands)
+        assert any("rev-list HEAD..fork/main --count" in cmd for cmd in commands)
+        assert any("pull --ff-only fork main" in cmd for cmd in commands)
+        assert all("pull --ff-only origin main" not in cmd for cmd in commands)
+        mock_sync.assert_called_once()
+
+    @patch("shutil.which", return_value=None)
     @patch("subprocess.run")
     def test_update_already_up_to_date(
         self, mock_run, _mock_which, mock_args, capsys
     ):
         mock_run.side_effect = _make_run_side_effect(
-            branch="main", verify_ok=True, commit_count="0"
+            current_branch="main", verify_ok=True, commit_count="0"
         )
 
         cmd_update(mock_args)
@@ -113,7 +162,7 @@ class TestCmdUpdateBranchFallback:
     ):
         mock_which.side_effect = {"uv": "/usr/bin/uv", "npm": "/usr/bin/npm"}.get
         mock_run.side_effect = _make_run_side_effect(
-            branch="main", verify_ok=True, commit_count="1"
+            current_branch="main", verify_ok=True, commit_count="1"
         )
 
         cmd_update(mock_args)
@@ -159,7 +208,7 @@ class TestCmdUpdateBranchFallback:
             mock_sys.stdin.isatty.return_value = False
             mock_sys.stdout.isatty.return_value = False
             mock_run.side_effect = _make_run_side_effect(
-                branch="main", verify_ok=True, commit_count="1"
+                current_branch="main", verify_ok=True, commit_count="1"
             )
 
             cmd_update(mock_args)
@@ -188,7 +237,7 @@ class TestCmdUpdateProfileSkillSync:
         from pathlib import Path
 
         mock_run.side_effect = _make_run_side_effect(
-            branch="main", verify_ok=True, commit_count="1"
+            current_branch="main", verify_ok=True, commit_count="1"
         )
 
         default_p = SimpleNamespace(name="default", path=Path("/fake/.hermes"))
@@ -226,7 +275,7 @@ class TestCmdUpdateProfileSkillSync:
         from pathlib import Path
 
         mock_run.side_effect = _make_run_side_effect(
-            branch="main", verify_ok=True, commit_count="1"
+            current_branch="main", verify_ok=True, commit_count="1"
         )
 
         default_p = SimpleNamespace(name="default", path=Path("/fake/.hermes"))

@@ -14,6 +14,8 @@ from pathlib import Path
 from hermes_constants import get_hermes_home
 from typing import Dict, List, Optional
 
+from hermes_cli.git_update import resolve_update_target
+
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
@@ -152,10 +154,15 @@ def _check_via_rev(local_rev: str) -> Optional[int]:
 
 
 def _check_via_local_git(repo_dir: Path) -> Optional[int]:
-    """Count commits behind origin/main in a local checkout."""
+    """Count commits behind the branch Hermes would actually update from."""
+    git_cmd = ["git"]
+    target = resolve_update_target(git_cmd, repo_dir, branch="main")
+    if target is None:
+        return None
+
     try:
         subprocess.run(
-            ["git", "fetch", "origin", "--quiet"],
+            ["git", "fetch", target.remote, "--quiet"],
             capture_output=True, timeout=10,
             cwd=str(repo_dir),
         )
@@ -164,7 +171,7 @@ def _check_via_local_git(repo_dir: Path) -> Optional[int]:
 
     try:
         result = subprocess.run(
-            ["git", "rev-list", "--count", "HEAD..origin/main"],
+            ["git", "rev-list", "--count", f"HEAD..{target.ref}"],
             capture_output=True, text=True, timeout=5,
             cwd=str(repo_dir),
         )
@@ -175,12 +182,29 @@ def _check_via_local_git(repo_dir: Path) -> Optional[int]:
     return None
 
 
+def _find_local_repo_dir(hermes_home: Path) -> Optional[Path]:
+    """Pick the most relevant local git checkout for update checks.
+
+    Prefer the repository containing the running source tree (editable/dev installs),
+    then fall back to ``$HERMES_HOME/hermes-agent`` for launcher-managed clones.
+    """
+    candidates = [
+        Path(__file__).parent.parent.resolve(),
+        hermes_home / "hermes-agent",
+    ]
+    for candidate in candidates:
+        if (candidate / ".git").exists():
+            return candidate
+    return None
+
+
 def check_for_updates() -> Optional[int]:
     """Check whether a Hermes update is available.
 
     Two paths: if ``HERMES_REVISION`` is set (nix builds embed it), compare
     it to upstream main via ``git ls-remote``. Otherwise look for a local
-    git checkout and count commits behind ``origin/main``.
+    git checkout and count commits behind the branch Hermes would actually
+    update from (tracking branch first, then official remote fallback).
 
     Returns the number of commits behind, ``UPDATE_AVAILABLE_NO_COUNT`` (-1)
     if behind but the count is unknown, ``0`` if up-to-date, or ``None`` if
@@ -190,7 +214,13 @@ def check_for_updates() -> Optional[int]:
     cache_file = hermes_home / ".update_check"
     embedded_rev = os.environ.get("HERMES_REVISION") or None
 
-    # Read cache — invalidate if the embedded rev has changed since last check
+    repo_dir = None
+    repo_cache_key = None
+    if not embedded_rev:
+        repo_dir = _find_local_repo_dir(hermes_home)
+        repo_cache_key = str(repo_dir) if repo_dir is not None else None
+
+    # Read cache — invalidate if the embedded rev or local repo target changed.
     now = time.time()
     try:
         if cache_file.exists():
@@ -198,6 +228,7 @@ def check_for_updates() -> Optional[int]:
             if (
                 now - cached.get("ts", 0) < _UPDATE_CHECK_CACHE_SECONDS
                 and cached.get("rev") == embedded_rev
+                and cached.get("repo") == repo_cache_key
             ):
                 return cached.get("behind")
     except Exception:
@@ -206,15 +237,21 @@ def check_for_updates() -> Optional[int]:
     if embedded_rev:
         behind = _check_via_rev(embedded_rev)
     else:
-        repo_dir = hermes_home / "hermes-agent"
-        if not (repo_dir / ".git").exists():
-            repo_dir = Path(__file__).parent.parent.resolve()
-        if not (repo_dir / ".git").exists():
+        if repo_dir is None:
             return None
         behind = _check_via_local_git(repo_dir)
 
     try:
-        cache_file.write_text(json.dumps({"ts": now, "behind": behind, "rev": embedded_rev}))
+        cache_file.write_text(
+            json.dumps(
+                {
+                    "ts": now,
+                    "behind": behind,
+                    "rev": embedded_rev,
+                    "repo": repo_cache_key,
+                }
+            )
+        )
     except Exception:
         pass
 

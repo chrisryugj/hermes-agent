@@ -10,6 +10,25 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+def _mock_git_update_run(cmd, **kwargs):
+    joined = " ".join(str(c) for c in cmd)
+
+    if "main@{upstream}" in joined:
+        return MagicMock(returncode=0, stdout="fork/main\n", stderr="")
+    if joined.endswith("git remote"):
+        return MagicMock(returncode=0, stdout="fork\norigin\n", stderr="")
+    if "remote get-url fork" in joined:
+        return MagicMock(returncode=0, stdout="git@github.com:user/hermes-agent.git\n", stderr="")
+    if "remote get-url origin" in joined:
+        return MagicMock(returncode=0, stdout="https://github.com/NousResearch/hermes-agent.git\n", stderr="")
+    if "fetch fork --quiet" in joined:
+        return MagicMock(returncode=0, stdout="", stderr="")
+    if "rev-list --count HEAD..fork/main" in joined:
+        return MagicMock(returncode=0, stdout="5\n", stderr="")
+
+    raise AssertionError(f"Unexpected git command: {joined}")
+
+
 def test_version_string_no_v_prefix():
     """__version__ should be bare semver without a 'v' prefix."""
     from hermes_cli import __version__
@@ -26,7 +45,9 @@ def test_check_for_updates_uses_cache(tmp_path, monkeypatch):
     (repo_dir / ".git").mkdir()
 
     cache_file = tmp_path / ".update_check"
-    cache_file.write_text(json.dumps({"ts": time.time(), "behind": 3}))
+    cache_file.write_text(
+        json.dumps({"ts": time.time(), "behind": 3, "repo": str(Path(__file__).resolve().parents[2])})
+    )
 
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     with patch("hermes_cli.banner.subprocess.run") as mock_run:
@@ -37,7 +58,7 @@ def test_check_for_updates_uses_cache(tmp_path, monkeypatch):
 
 
 def test_check_for_updates_expired_cache(tmp_path, monkeypatch):
-    """When cache is expired, check_for_updates should call git fetch."""
+    """When cache is expired, check_for_updates should refresh against main's upstream."""
     from hermes_cli.banner import check_for_updates
 
     repo_dir = tmp_path / "hermes-agent"
@@ -48,14 +69,37 @@ def test_check_for_updates_expired_cache(tmp_path, monkeypatch):
     cache_file = tmp_path / ".update_check"
     cache_file.write_text(json.dumps({"ts": 0, "behind": 1}))
 
-    mock_result = MagicMock(returncode=0, stdout="5\n")
-
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-    with patch("hermes_cli.banner.subprocess.run", return_value=mock_result) as mock_run:
+    with patch("hermes_cli.banner.subprocess.run", side_effect=_mock_git_update_run) as mock_run:
         result = check_for_updates()
 
     assert result == 5
-    assert mock_run.call_count == 2  # git fetch + git rev-list
+    commands = [" ".join(str(a) for a in c.args[0]) for c in mock_run.call_args_list]
+    assert any("fetch fork --quiet" in cmd for cmd in commands)
+    assert any("rev-list --count HEAD..fork/main" in cmd for cmd in commands)
+
+
+def test_check_for_updates_uses_main_tracking_remote_instead_of_origin(tmp_path, monkeypatch):
+    """Version/update checks should follow main's upstream, not assume origin/main."""
+    from hermes_cli.banner import check_for_updates
+
+    repo_dir = tmp_path / "hermes-agent"
+    repo_dir.mkdir()
+    (repo_dir / ".git").mkdir()
+
+    cache_file = tmp_path / ".update_check"
+    cache_file.write_text(json.dumps({"ts": 0, "behind": 1}))
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    with patch("hermes_cli.banner.subprocess.run", side_effect=_mock_git_update_run) as mock_run:
+        result = check_for_updates()
+
+    assert result == 5
+    commands = [" ".join(str(a) for a in c.args[0]) for c in mock_run.call_args_list]
+    assert any("main@{upstream}" in cmd for cmd in commands)
+    assert any("fetch fork --quiet" in cmd for cmd in commands)
+    assert any("HEAD..fork/main" in cmd for cmd in commands)
+    assert all("HEAD..origin/main" not in cmd for cmd in commands)
 
 
 def test_check_for_updates_no_git_dir(tmp_path, monkeypatch):
