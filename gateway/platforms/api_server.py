@@ -2325,6 +2325,145 @@ class APIServerAdapter(BasePlatformAdapter):
         })
 
     # ------------------------------------------------------------------
+    # Image generation (OpenAI-compatible) — routes through registered
+    # ``openai-codex`` image-gen provider (gpt-image-2 via Codex OAuth).
+    # ------------------------------------------------------------------
+
+    # OpenAI literal size → provider aspect-ratio key
+    _IMAGE_SIZE_TO_ASPECT = {
+        "1024x1024": ("square", "1024x1024"),
+        "1536x1024": ("landscape", "1536x1024"),
+        "1024x1536": ("portrait", "1024x1536"),
+        # Common DALL-E aliases mapped to closest gpt-image-2 size
+        "1792x1024": ("landscape", "1536x1024"),
+        "1024x1792": ("portrait", "1024x1536"),
+        "512x512":   ("square", "1024x1024"),
+        "256x256":   ("square", "1024x1024"),
+    }
+
+    async def _handle_image_generation(self, request: "web.Request") -> "web.Response":
+        """POST /v1/images/generations — OpenAI-compatible image generation.
+
+        Body: ``{model, prompt, size?, quality?, n?}``. Only ``n=1`` supported
+        right now (gpt-image-2 via Codex always returns one image per call).
+        Routes through the ``openai-codex`` image-gen provider so no separate
+        OpenAI API key is needed — Codex OAuth credentials are reused.
+        """
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response(
+                {"error": {"message": "Invalid JSON body", "type": "invalid_request_error"}},
+                status=400,
+            )
+        if not isinstance(body, dict):
+            return web.json_response(
+                {"error": {"message": "Request body must be a JSON object", "type": "invalid_request_error"}},
+                status=400,
+            )
+
+        prompt = body.get("prompt")
+        if not isinstance(prompt, str) or not prompt.strip():
+            return web.json_response(
+                {"error": {"message": "prompt is required", "type": "invalid_request_error"}},
+                status=400,
+            )
+
+        size = body.get("size") or "1024x1024"
+        aspect, mapped_size = self._IMAGE_SIZE_TO_ASPECT.get(size, ("square", "1024x1024"))
+
+        quality = body.get("quality") or "medium"
+        if quality not in ("low", "medium", "high"):
+            quality = "medium"
+
+        # n>1 not supported — Codex stream returns a single image per call.
+        n = body.get("n", 1)
+        try:
+            n = int(n)
+        except (TypeError, ValueError):
+            n = 1
+        if n != 1:
+            return web.json_response(
+                {"error": {"message": "Only n=1 is supported", "type": "invalid_request_error"}},
+                status=400,
+            )
+
+        # Pull the registered openai-codex provider so we can reuse its
+        # ``_build_codex_client`` / ``_collect_image_b64`` helpers and bypass
+        # the on-disk save path that ``provider.generate()`` performs.
+        try:
+            from agent.image_gen_registry import get_provider
+        except Exception as exc:
+            return web.json_response(
+                {"error": {"message": f"image-gen registry unavailable: {exc}", "type": "server_error"}},
+                status=503,
+            )
+
+        provider = get_provider("openai-codex")
+        if provider is None:
+            return web.json_response(
+                {"error": {"message": "openai-codex provider not registered", "type": "server_error"}},
+                status=503,
+            )
+        try:
+            if not provider.is_available():
+                return web.json_response(
+                    {"error": {"message": "Codex OAuth credentials not available", "type": "auth_required"}},
+                    status=401,
+                )
+        except Exception as exc:
+            return web.json_response(
+                {"error": {"message": f"provider availability check failed: {exc}", "type": "server_error"}},
+                status=500,
+            )
+
+        # The plugin module sits under ``plugins/image_gen/openai-codex/`` —
+        # the dash means we can't import it by name. Reach in via the
+        # registered instance's class module instead.
+        import sys
+        provider_module = sys.modules.get(type(provider).__module__)
+        if provider_module is None:
+            return web.json_response(
+                {"error": {"message": "openai-codex provider module not loaded", "type": "server_error"}},
+                status=503,
+            )
+
+        build_client = getattr(provider_module, "_build_codex_client", None)
+        collect_b64 = getattr(provider_module, "_collect_image_b64", None)
+        if build_client is None or collect_b64 is None:
+            return web.json_response(
+                {"error": {"message": "openai-codex provider missing required helpers", "type": "server_error"}},
+                status=503,
+            )
+
+        def _do_generation() -> str:
+            client = build_client()
+            if client is None:
+                raise RuntimeError("Could not build Codex client")
+            b64 = collect_b64(client, prompt=prompt, size=mapped_size, quality=quality)
+            if not b64:
+                raise RuntimeError("Codex returned no image data")
+            return b64
+
+        try:
+            b64_image = await asyncio.to_thread(_do_generation)
+        except Exception as exc:
+            logger.exception("image generation failed")
+            return web.json_response(
+                {"error": {"message": f"image generation failed: {exc}", "type": "server_error"}},
+                status=502,
+            )
+
+        return web.json_response({
+            "created": int(time.time()),
+            "data": [{"b64_json": b64_image}],
+        })
+
+    # ------------------------------------------------------------------
     # Cron jobs API
     # ------------------------------------------------------------------
 
@@ -3326,6 +3465,7 @@ class APIServerAdapter(BasePlatformAdapter):
             self._app.router.add_post("/v1/responses", self._handle_responses)
             self._app.router.add_get("/v1/responses/{response_id}", self._handle_get_response)
             self._app.router.add_delete("/v1/responses/{response_id}", self._handle_delete_response)
+            self._app.router.add_post("/v1/images/generations", self._handle_image_generation)
             # Cron jobs management API
             self._app.router.add_get("/api/jobs", self._handle_list_jobs)
             self._app.router.add_post("/api/jobs", self._handle_create_job)
