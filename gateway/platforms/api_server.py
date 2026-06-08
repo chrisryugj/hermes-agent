@@ -3367,13 +3367,25 @@ class APIServerAdapter(BasePlatformAdapter):
 
         def _render():
             import base64
+            import time
             import fitz  # PyMuPDF
             import httpx
 
-            with httpx.Client(timeout=60.0) as client:
-                resp = client.get(pdf_url)
-                resp.raise_for_status()
-                pdf_bytes = resp.content
+            # 같은 PDF를 페이지마다 다시 받지 않도록 URL 기준 5분 캐시(최근 3개).
+            cache = globals().setdefault("_PDF_RENDER_CACHE", {})
+            now = time.time()
+            ent = cache.get(pdf_url)
+            if ent and now - ent[1] < 300:
+                pdf_bytes = ent[0]
+            else:
+                with httpx.Client(timeout=60.0) as client:
+                    resp = client.get(pdf_url)
+                    resp.raise_for_status()
+                    pdf_bytes = resp.content
+                cache[pdf_url] = (pdf_bytes, now)
+                if len(cache) > 3:
+                    oldest = min(cache, key=lambda k: cache[k][1])
+                    del cache[oldest]
             doc = fitz.open(stream=pdf_bytes, filetype="pdf")
             num_pages = doc.page_count
             if page_no < 1 or page_no > num_pages:
