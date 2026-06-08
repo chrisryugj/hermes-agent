@@ -3097,6 +3097,58 @@ class APIServerAdapter(BasePlatformAdapter):
         "256x256":   ("square", "1024x1024"),
     }
 
+    def _get_codex_image_helpers(self):
+        """Resolve (read_token, collect_b64) from the openai-codex provider.
+
+        Returns ``((read_token, collect_b64), None)`` on success, or
+        ``(None, error_response)`` on any failure. Shared by the
+        ``/v1/images/generations`` and ``/v1/images/edits`` handlers.
+        """
+        try:
+            from agent.image_gen_registry import get_provider
+        except Exception as exc:
+            return None, web.json_response(
+                {"error": {"message": f"image-gen registry unavailable: {exc}", "type": "server_error"}},
+                status=503,
+            )
+
+        provider = get_provider("openai-codex")
+        if provider is None:
+            return None, web.json_response(
+                {"error": {"message": "openai-codex provider not registered", "type": "server_error"}},
+                status=503,
+            )
+        try:
+            if not provider.is_available():
+                return None, web.json_response(
+                    {"error": {"message": "Codex OAuth credentials not available", "type": "auth_required"}},
+                    status=401,
+                )
+        except Exception as exc:
+            return None, web.json_response(
+                {"error": {"message": f"provider availability check failed: {exc}", "type": "server_error"}},
+                status=500,
+            )
+
+        # Plugin lives under ``plugins/image_gen/openai-codex/`` — the dash
+        # blocks import by name, so reach in via the instance's class module.
+        import sys
+        provider_module = sys.modules.get(type(provider).__module__)
+        if provider_module is None:
+            return None, web.json_response(
+                {"error": {"message": "openai-codex provider module not loaded", "type": "server_error"}},
+                status=503,
+            )
+
+        read_token = getattr(provider_module, "_read_codex_access_token", None)
+        collect_b64 = getattr(provider_module, "_collect_image_b64", None)
+        if read_token is None or collect_b64 is None:
+            return None, web.json_response(
+                {"error": {"message": "openai-codex provider missing required helpers", "type": "server_error"}},
+                status=503,
+            )
+        return (read_token, collect_b64), None
+
     async def _handle_image_generation(self, request: "web.Request") -> "web.Response":
         """POST /v1/images/generations — OpenAI-compatible image generation.
 
@@ -3148,59 +3200,18 @@ class APIServerAdapter(BasePlatformAdapter):
                 status=400,
             )
 
-        # Pull the registered openai-codex provider so we can reuse its
-        # ``_build_codex_client`` / ``_collect_image_b64`` helpers and bypass
-        # the on-disk save path that ``provider.generate()`` performs.
-        try:
-            from agent.image_gen_registry import get_provider
-        except Exception as exc:
-            return web.json_response(
-                {"error": {"message": f"image-gen registry unavailable: {exc}", "type": "server_error"}},
-                status=503,
-            )
-
-        provider = get_provider("openai-codex")
-        if provider is None:
-            return web.json_response(
-                {"error": {"message": "openai-codex provider not registered", "type": "server_error"}},
-                status=503,
-            )
-        try:
-            if not provider.is_available():
-                return web.json_response(
-                    {"error": {"message": "Codex OAuth credentials not available", "type": "auth_required"}},
-                    status=401,
-                )
-        except Exception as exc:
-            return web.json_response(
-                {"error": {"message": f"provider availability check failed: {exc}", "type": "server_error"}},
-                status=500,
-            )
-
-        # The plugin module sits under ``plugins/image_gen/openai-codex/`` —
-        # the dash means we can't import it by name. Reach in via the
-        # registered instance's class module instead.
-        import sys
-        provider_module = sys.modules.get(type(provider).__module__)
-        if provider_module is None:
-            return web.json_response(
-                {"error": {"message": "openai-codex provider module not loaded", "type": "server_error"}},
-                status=503,
-            )
-
-        build_client = getattr(provider_module, "_build_codex_client", None)
-        collect_b64 = getattr(provider_module, "_collect_image_b64", None)
-        if build_client is None or collect_b64 is None:
-            return web.json_response(
-                {"error": {"message": "openai-codex provider missing required helpers", "type": "server_error"}},
-                status=503,
-            )
+        # Reuse the openai-codex provider's token reader + SSE collector,
+        # bypassing the on-disk save path that ``provider.generate()`` performs.
+        helpers, err = self._get_codex_image_helpers()
+        if err is not None:
+            return err
+        read_token, collect_b64 = helpers
 
         def _do_generation() -> str:
-            client = build_client()
-            if client is None:
-                raise RuntimeError("Could not build Codex client")
-            b64 = collect_b64(client, prompt=prompt, size=mapped_size, quality=quality)
+            token = read_token()
+            if not token:
+                raise RuntimeError("No Codex OAuth token available")
+            b64 = collect_b64(token, prompt=prompt, size=mapped_size, quality=quality)
             if not b64:
                 raise RuntimeError("Codex returned no image data")
             return b64
@@ -3217,6 +3228,197 @@ class APIServerAdapter(BasePlatformAdapter):
         return web.json_response({
             "created": int(time.time()),
             "data": [{"b64_json": b64_image}],
+        })
+
+    async def _handle_image_edit(self, request: "web.Request") -> "web.Response":
+        """POST /v1/images/edits — OpenAI-compatible image-to-image edit.
+
+        Accepts multipart/form-data (``image`` file + ``prompt``/``size``/
+        ``quality`` fields) or JSON (``{image, prompt, size?, quality?}`` where
+        ``image`` is base64, optionally a ``data:`` URI). Routes through the
+        openai-codex image_generation tool with the source image attached as
+        ``input_image`` (high input fidelity) so the design is preserved and
+        only the text is translated/edited.
+        """
+        import base64
+
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+
+        prompt: Optional[str] = None
+        size = "1024x1024"
+        quality = "medium"
+        image_b64: Optional[str] = None
+
+        content_type = request.headers.get("Content-Type", "")
+        try:
+            if "multipart/form-data" in content_type:
+                reader = await request.multipart()
+                async for part in reader:
+                    name = part.name
+                    if name == "image":
+                        raw = await part.read(decode=False)
+                        image_b64 = base64.b64encode(raw).decode("ascii")
+                    elif name == "prompt":
+                        prompt = (await part.text()).strip()
+                    elif name == "size":
+                        size = (await part.text()).strip() or size
+                    elif name == "quality":
+                        quality = (await part.text()).strip() or quality
+                    elif name == "mask":
+                        await part.read(decode=False)  # mask는 현재 미사용
+            else:
+                body = await request.json()
+                if not isinstance(body, dict):
+                    raise ValueError("JSON body must be an object")
+                raw_prompt = body.get("prompt")
+                prompt = raw_prompt.strip() if isinstance(raw_prompt, str) else None
+                size = body.get("size") or size
+                quality = body.get("quality") or quality
+                img = body.get("image")
+                if isinstance(img, str):
+                    image_b64 = img.split(",", 1)[-1] if img.startswith("data:") else img
+        except Exception as exc:
+            return web.json_response(
+                {"error": {"message": f"Invalid request body: {exc}", "type": "invalid_request_error"}},
+                status=400,
+            )
+
+        if not isinstance(prompt, str) or not prompt:
+            return web.json_response(
+                {"error": {"message": "prompt is required", "type": "invalid_request_error"}},
+                status=400,
+            )
+        if not image_b64:
+            return web.json_response(
+                {"error": {"message": "image is required", "type": "invalid_request_error"}},
+                status=400,
+            )
+        if quality not in ("low", "medium", "high"):
+            quality = "medium"
+        _aspect, mapped_size = self._IMAGE_SIZE_TO_ASPECT.get(size, ("square", "1024x1024"))
+
+        helpers, err = self._get_codex_image_helpers()
+        if err is not None:
+            return err
+        read_token, collect_b64 = helpers
+
+        def _do_edit() -> str:
+            token = read_token()
+            if not token:
+                raise RuntimeError("No Codex OAuth token available")
+            b64 = collect_b64(
+                token,
+                prompt=prompt,
+                size=mapped_size,
+                quality=quality,
+                image_b64=image_b64,
+            )
+            if not b64:
+                raise RuntimeError("Codex returned no image data")
+            return b64
+
+        try:
+            b64_image = await asyncio.to_thread(_do_edit)
+        except Exception as exc:
+            logger.exception("image edit failed")
+            return web.json_response(
+                {"error": {"message": f"image edit failed: {exc}", "type": "server_error"}},
+                status=502,
+            )
+
+        return web.json_response({
+            "created": int(time.time()),
+            "data": [{"b64_json": b64_image}],
+        })
+
+    async def _handle_pdf_render(self, request: "web.Request") -> "web.Response":
+        """POST /v1/pdf/render — render one PDF page to PNG + text bbox (PyMuPDF).
+
+        Body: ``{pdf_url, page=1, scale=2}``. Returns
+        ``{page, num_pages, width, height, png_b64, tokens:[{x,y,w,h,text}]}``
+        with normalized (0..1) token boxes for an overlay text layer.
+        """
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response(
+                {"error": {"message": "Invalid JSON body", "type": "invalid_request_error"}},
+                status=400,
+            )
+        pdf_url = body.get("pdf_url") if isinstance(body, dict) else None
+        if not isinstance(pdf_url, str) or not pdf_url:
+            return web.json_response(
+                {"error": {"message": "pdf_url is required", "type": "invalid_request_error"}},
+                status=400,
+            )
+        try:
+            page_no = int(body.get("page", 1))
+            scale = float(body.get("scale", 2))
+        except (TypeError, ValueError):
+            return web.json_response(
+                {"error": {"message": "page/scale must be numbers", "type": "invalid_request_error"}},
+                status=400,
+            )
+
+        def _render():
+            import base64
+            import fitz  # PyMuPDF
+            import httpx
+
+            with httpx.Client(timeout=60.0) as client:
+                resp = client.get(pdf_url)
+                resp.raise_for_status()
+                pdf_bytes = resp.content
+            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+            num_pages = doc.page_count
+            if page_no < 1 or page_no > num_pages:
+                raise ValueError(f"page {page_no} out of range (1..{num_pages})")
+            page = doc[page_no - 1]
+            rect = page.rect
+            pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
+            png = pix.tobytes("png")
+            tokens = []
+            w_pt = rect.width or 1.0
+            h_pt = rect.height or 1.0
+            for word in page.get_text("words"):
+                x0, y0, x1, y1, txt = word[0], word[1], word[2], word[3], word[4]
+                if not txt or not txt.strip():
+                    continue
+                tokens.append({
+                    "x": x0 / w_pt,
+                    "y": y0 / h_pt,
+                    "w": (x1 - x0) / w_pt,
+                    "h": (y1 - y0) / h_pt,
+                    "text": txt,
+                })
+            return (
+                num_pages,
+                int(rect.width * scale),
+                int(rect.height * scale),
+                base64.b64encode(png).decode("ascii"),
+                tokens,
+            )
+
+        try:
+            num_pages, width, height, png_b64, tokens = await asyncio.to_thread(_render)
+        except Exception as exc:
+            logger.exception("pdf render failed")
+            return web.json_response(
+                {"error": {"message": f"pdf render failed: {exc}", "type": "server_error"}},
+                status=502,
+            )
+        return web.json_response({
+            "page": page_no,
+            "num_pages": num_pages,
+            "width": width,
+            "height": height,
+            "png_b64": png_b64,
+            "tokens": tokens,
         })
 
     # ------------------------------------------------------------------
@@ -4243,6 +4445,8 @@ class APIServerAdapter(BasePlatformAdapter):
             self._app.router.add_get("/v1/responses/{response_id}", self._handle_get_response)
             self._app.router.add_delete("/v1/responses/{response_id}", self._handle_delete_response)
             self._app.router.add_post("/v1/images/generations", self._handle_image_generation)
+            self._app.router.add_post("/v1/images/edits", self._handle_image_edit)
+            self._app.router.add_post("/v1/pdf/render", self._handle_pdf_render)
             # Cron jobs management API
             self._app.router.add_get("/api/jobs", self._handle_list_jobs)
             self._app.router.add_post("/api/jobs", self._handle_create_job)

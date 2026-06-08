@@ -143,8 +143,31 @@ def _read_codex_access_token() -> Optional[str]:
         return None
 
 
-def _build_responses_payload(*, prompt: str, size: str, quality: str) -> Dict[str, Any]:
-    """Build the Codex Responses request body for an image_generation call."""
+def _build_responses_payload(
+    *, prompt: str, size: str, quality: str, image_b64: Optional[str] = None
+) -> Dict[str, Any]:
+    """Build the Codex Responses request body for an image_generation call.
+
+    When ``image_b64`` is provided, the source image is attached as an
+    ``input_image`` and ``input_fidelity`` is raised to "high" so the model
+    edits the supplied image (e.g. translate text while keeping the design)
+    instead of generating a fresh one.
+    """
+    content: List[Dict[str, Any]] = [{"type": "input_text", "text": prompt}]
+    tool: Dict[str, Any] = {
+        "type": "image_generation",
+        "model": API_MODEL,
+        "size": size,
+        "quality": quality,
+        "output_format": "png",
+        "background": "opaque",
+        "partial_images": 1,
+    }
+    if image_b64:
+        content.append({
+            "type": "input_image",
+            "image_url": f"data:image/png;base64,{image_b64}",
+        })
     return {
         "model": _CODEX_CHAT_MODEL,
         "store": False,
@@ -152,17 +175,9 @@ def _build_responses_payload(*, prompt: str, size: str, quality: str) -> Dict[st
         "input": [{
             "type": "message",
             "role": "user",
-            "content": [{"type": "input_text", "text": prompt}],
+            "content": content,
         }],
-        "tools": [{
-            "type": "image_generation",
-            "model": API_MODEL,
-            "size": size,
-            "quality": quality,
-            "output_format": "png",
-            "background": "opaque",
-            "partial_images": 1,
-        }],
+        "tools": [tool],
         "tool_choice": {
             "type": "allowed_tools",
             "mode": "required",
@@ -172,17 +187,21 @@ def _build_responses_payload(*, prompt: str, size: str, quality: str) -> Dict[st
     }
 
 
+_IMG_B64_KEYS = ("result", "partial_image_b64", "b64_json", "image_b64", "image", "b64")
+
+
 def _extract_image_b64(value: Any) -> Optional[str]:
-    """Return the newest image b64 embedded in a Responses event payload."""
+    """Return the newest image b64 embedded in a Responses event payload.
+
+    Tolerant of Codex event-shape drift: scans several known b64 keys and keeps
+    the longest plausible base64 string found (partial or final image).
+    """
     found: Optional[str] = None
     if isinstance(value, dict):
-        if value.get("type") == "image_generation_call":
-            result = value.get("result")
-            if isinstance(result, str) and result:
-                found = result
-        partial = value.get("partial_image_b64")
-        if isinstance(partial, str) and partial:
-            found = partial
+        for key in _IMG_B64_KEYS:
+            v = value.get(key)
+            if isinstance(v, str) and len(v) > 256:
+                found = v
         for child in value.values():
             nested = _extract_image_b64(child)
             if nested:
@@ -242,8 +261,18 @@ def _iter_sse_json(response: Any):
         yield payload
 
 
-def _collect_image_b64(token: str, *, prompt: str, size: str, quality: str) -> Optional[str]:
-    """Stream a Codex Responses image_generation call and return the b64 image."""
+def _collect_image_b64(
+    token: str,
+    *,
+    prompt: str,
+    size: str,
+    quality: str,
+    image_b64: Optional[str] = None,
+) -> Optional[str]:
+    """Stream a Codex Responses image_generation call and return the b64 image.
+
+    ``image_b64`` (optional) attaches a source image for edit/translation.
+    """
     import httpx
     from agent.auxiliary_client import _codex_cloudflare_headers
 
@@ -253,8 +282,10 @@ def _collect_image_b64(token: str, *, prompt: str, size: str, quality: str) -> O
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
     })
-    payload = _build_responses_payload(prompt=prompt, size=size, quality=quality)
-    timeout = httpx.Timeout(300.0, connect=30.0, read=300.0, write=30.0, pool=30.0)
+    payload = _build_responses_payload(
+        prompt=prompt, size=size, quality=quality, image_b64=image_b64
+    )
+    timeout = httpx.Timeout(600.0, connect=30.0, read=600.0, write=30.0, pool=30.0)
 
     image_b64: Optional[str] = None
     with httpx.Client(timeout=timeout, headers=headers) as http:
@@ -268,6 +299,10 @@ def _collect_image_b64(token: str, *, prompt: str, size: str, quality: str) -> O
                     f"Codex Responses API returned HTTP {exc.response.status_code}: {body}"
                 ) from exc
             for event in _iter_sse_json(response):
+                if isinstance(event, dict):
+                    _et = event.get("type")
+                    if _et in ("response.failed", "error", "response.incomplete"):
+                        logger.warning("Codex image event %s: %s", _et, json.dumps(event)[:500])
                 found = _extract_image_b64(event)
                 if found:
                     image_b64 = found
