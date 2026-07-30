@@ -8,6 +8,9 @@ LOG_FILE="$LOG_DIR/cloudflared.log"
 URL_FILE="$LOG_DIR/quick-tunnel-url.txt"
 HERMES_PORT="${HERMES_PORT:-8642}"
 
+# e2e 헬스체크용 게이트웨이 키 (코드에 기본값을 두지 않는다)
+HERMES_API_KEY="${HERMES_API_KEY:-$(grep "^API_SERVER_KEY=" "$HOME/.hermes/.env" 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d "'")}"
+
 mkdir -p "$LOG_DIR"
 
 # 뮤텍스: 중복 실행 방지
@@ -68,7 +71,7 @@ while true; do
       HEALTH_COUNTER=0
       HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 8 \
         "https://openclaw-bridge.ryuseungin.workers.dev/health" \
-        -H "Authorization: Bearer lexdiff-hermes-local" 2>/dev/null || echo "000")
+        -H "Authorization: Bearer ${HERMES_API_KEY}" 2>/dev/null || echo "000")
       if [ "$HTTP_CODE" != "200" ]; then
         FAIL_STREAK=$((FAIL_STREAK + 1))
         log "e2e health failed (HTTP $HTTP_CODE) streak=$FAIL_STREAK/$MAX_FAIL_STREAK"

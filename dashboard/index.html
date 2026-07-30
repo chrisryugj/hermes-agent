@@ -98,7 +98,7 @@ table{width:100%;border-collapse:collapse;}th{text-align:left;padding:.5rem .75r
 <div id="gm" class="modal-bg" style="display:none" onclick="if(event.target===this)gmClose()"><div class="modal" id="gm-body"></div></div>
 
 <script>
-const A='/api/dashboard',H='Bearer '+(new URLSearchParams(location.search).get('key')||'lexdiff-hermes-local');
+const A='/api/dashboard',H='Bearer '+(new URLSearchParams(location.search).get('key')||'');
 const J=JSON.stringify,P=JSON.parse,$=id=>document.getElementById(id);
 async function api(p,o={}){try{const r=await fetch(A+p,{...o,headers:{Authorization:H,'Content-Type':'application/json',...o.headers}});if(!r.ok){const t=await r.text().catch(()=>'');toast(`API ${r.status}: ${t.slice(0,80)}`,'err');return{};}return await r.json();}catch(e){toast('Network error: '+e.message,'err');return{};}}
 function esc(s){if(s==null)return'';const d=document.createElement('div');d.textContent=String(s);return d.innerHTML.replace(/'/g,'&#39;').replace(/\\/g,'&#92;');}

@@ -62,11 +62,11 @@ Add `HERMES_DASHBOARD_DIR` here only if you want to override the default
 curl -s -o /dev/null -w "gateway=%{http_code}\n"   http://localhost:8642/health
 curl -s -o /dev/null -w "fc-rag-log=%{http_code}\n" \
      -X POST http://localhost:8642/api/fc-rag-log \
-     -H "Authorization: Bearer lexdiff-hermes-local" \
+     -H "Authorization: Bearer $API_SERVER_KEY" \
      -H "Content-Type: application/json" -d '{}'
 curl -s -o /dev/null -w "tunnel=%{http_code}\n" \
      https://openclaw-bridge.ryuseungin.workers.dev/health \
-     -H "Authorization: Bearer lexdiff-hermes-local"
+     -H "Authorization: Bearer $API_SERVER_KEY"
 ```
 
 Expected: `gateway=200`, `fc-rag-log=202`, `tunnel=200`.

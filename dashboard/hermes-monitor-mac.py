@@ -261,7 +261,7 @@ class HermesMonitorApp(rumps.App):
                 f"{cf_worker}/health",
                 headers={
                     "User-Agent": "HermesMonitor/1.0",
-                    "Authorization": "Bearer lexdiff-hermes-local",
+                    "Authorization": f"Bearer {API_KEY}",
                 },
             )
             resp = urllib.request.urlopen(req, timeout=8)

@@ -18,7 +18,7 @@ if [ -z "$TUNNEL_URL" ]; then
   exit 1
 fi
 
-# Hermes .env에서 CF 설정 읽기 (없으면 하드코딩 기본값)
+# Hermes .env에서 CF 설정 읽기 (자격증명은 env 전용 — 코드에 기본값 두지 않는다)
 ENV_FILE="$HOME/.hermes/.env"
 get_env() { grep "^$1=" "$ENV_FILE" 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d "'"; }
 
@@ -27,9 +27,11 @@ CF_ACCOUNT_ID="${CF_ACCOUNT_ID:-$(get_env CF_ACCOUNT_ID)}"
 CF_WORKER_NAME="${CF_WORKER_NAME:-$(get_env CF_WORKER_NAME)}"
 CF_WORKER_URL="${CF_WORKER_URL:-$(get_env CF_WORKER_URL)}"
 
-# 기본값 (기존 bridge에서 이관)
-[ -z "$CF_API_TOKEN" ] && CF_API_TOKEN="Q49sL_Cqkbly6kvXuQRb8Mfo6pc9m6lqyLyTeMgC"
-[ -z "$CF_ACCOUNT_ID" ] && CF_ACCOUNT_ID="d43dfeef1bd186fe4e7bbaf3563e1c59"
+if [ -z "$CF_API_TOKEN" ] || [ -z "$CF_ACCOUNT_ID" ]; then
+  echo "CF_API_TOKEN / CF_ACCOUNT_ID 가 필요합니다. $ENV_FILE 에 설정하거나 환경변수로 넘기세요." >&2
+  exit 1
+fi
+
 [ -z "$CF_WORKER_NAME" ] && CF_WORKER_NAME="openclaw-bridge"
 [ -z "$CF_WORKER_URL" ] && CF_WORKER_URL="https://openclaw-bridge.ryuseungin.workers.dev"
 
