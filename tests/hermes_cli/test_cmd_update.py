@@ -493,6 +493,11 @@ class TestCmdUpdateBranchFlag:
         def side_effect(cmd, **kwargs):
             joined = " ".join(str(c) for c in cmd)
 
+            # No tracking branch configured — resolve_update_target falls back
+            # to origin/<branch>, matching the plain-origin expectations below.
+            if "@{upstream}" in joined:
+                return subprocess.CompletedProcess(cmd, 128, stdout="", stderr="")
+
             if "rev-parse" in joined and "--abbrev-ref" in joined:
                 return subprocess.CompletedProcess(cmd, 0, stdout=f"{current_branch}\n", stderr="")
 
