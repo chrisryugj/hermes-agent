@@ -334,6 +334,10 @@ def _build_responses_payload(
 
 
 _IMG_B64_KEYS = ("result", "partial_image_b64", "b64_json", "image_b64", "image", "b64")
+# 키 이름 자체가 b64 페이로드를 보증하는 키. 1x1 PNG처럼 짧아도 유효하므로
+# 길이 검사를 걸지 않는다. 나머지(result/image)는 이미지 이벤트가 아닌 곳에서
+# id·상태 문자열로도 쓰이므로 길이로 걸러낸다.
+_IMG_B64_EXPLICIT_KEYS = frozenset({"partial_image_b64", "b64_json", "image_b64", "b64"})
 
 
 def _extract_image_b64(value: Any) -> Optional[str]:
@@ -344,9 +348,12 @@ def _extract_image_b64(value: Any) -> Optional[str]:
     """
     found: Optional[str] = None
     if isinstance(value, dict):
+        is_image_call = value.get("type") == "image_generation_call"
         for key in _IMG_B64_KEYS:
             v = value.get(key)
-            if isinstance(v, str) and len(v) > 256:
+            if not isinstance(v, str) or not v:
+                continue
+            if key in _IMG_B64_EXPLICIT_KEYS or is_image_call or len(v) > 256:
                 found = v
         for child in value.values():
             nested = _extract_image_b64(child)
