@@ -75,11 +75,19 @@ SUCCESS=$(echo "$RESP" | python3 -c "import json,sys; print(json.load(sys.stdin)
 if [ "$SUCCESS" = "True" ]; then
   log "Worker updated: ${CF_WORKER_NAME} -> ${TUNNEL_URL}"
   if [ -n "$CF_WORKER_URL" ]; then
-    sleep 2
-    if curl -sf --max-time 10 "${CF_WORKER_URL}/health" > /dev/null 2>&1; then
+    # CF 워커 전파는 2초보다 오래 걸릴 때가 있다 — 단발 체크는 상시 오경보를 낸다.
+    HEALTH_OK=0
+    for _ in 1 2 3 4 5 6; do
+      if curl -sf --max-time 10 "${CF_WORKER_URL}/health" > /dev/null 2>&1; then
+        HEALTH_OK=1
+        break
+      fi
+      sleep 5
+    done
+    if [ "$HEALTH_OK" = "1" ]; then
       log "Worker health OK"
     else
-      log "Worker health FAIL (may need time to propagate)"
+      log "Worker health FAIL (30s 재시도 후에도 응답 없음)"
     fi
   fi
 else
